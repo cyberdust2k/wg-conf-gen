@@ -1,28 +1,43 @@
 #!/bin/bash
-# wg-conf-gen
+# wg-conf-gen (c) Dustin Stratmann 2023
 # automates generating wireguard peer configs.
 # ---
 
 # user defined vars
 # --------------------------------------
-# specify listen port here, usually 51820
+# specify listen port here
 port=""
-# specify endpoint domain here (domain.example.com)
+# specify endpoint domain here
 domain=""
-# specify DNS (IPv4, IPv6 (optional))
+# specify DNS (IPv6)
 dns=""
+# enable IPv6 by uncommenting the variable
+# ena_v6=1
+# specify DNS (IPv6)
+dns6=""
 # specify second IP block (10.xxx.0.0/24)
 ipblock=""
 # specify local IP range (192.168.178.0/24)
 localip=""
-# which network device should be used? (ip addr, usually the one with the IP specified in "localip")
+# which network device should be used? (ip addr, usually the one with a similar IP as specified in "localip")
 netdev=""
 # -----------------END------------------
+
+
+# helper variables
+AllowIP="0.0.0.0/0"
+# Append IPv6 part to existing variable, if $ena_v6 is set
+if [ -n "$ena_v6" ]
+then
+        AllowIP="${AllowIP}, ::/0"
+fi
+
+conf=wg0
 
 # Prerequisite check
 if [ "$EUID" -ne 0 ]
   then
-	  echo "Please run as root"
+          echo "Please run as root"
   exit
 fi
 
@@ -30,7 +45,12 @@ fi
 while getopts "?ln:" opt; do
   case $opt in
      l)
-       l_set=1
+       AllowIP="10.$ipblock.0.1/32, $localip"
+       # Append IPv6 part to existing variable, if $ena_v6 is set
+       if [ -n "$ena_v6" ]
+       then
+               AllowIP="${AllowIP}, fc00:$ipblock:0:0::1/128, fd00::/64"
+       fi
        ;;
      n)
        conf=$OPTARG >&2
@@ -43,103 +63,131 @@ while getopts "?ln:" opt; do
   esac
 done
 
-# use wg0 if no config name specified
-if [ -z "$conf" ]
-  then
-	  conf=wg0
-  else 
-	  :
-fi
-
-# check if local mode is desired
-if [ -z $l_set ]
-  then 
-	AllowIP="0.0.0.0/0, ::/0"
-  else 
-	AllowIP="10.$ipblock.0.1/32, $localip, fc00:$ipblock:0:0::1/128, fd00::/64"
-fi
-
 # detect if config exists, prompt for creation
 if [ ! -f "/etc/wireguard/$conf.conf" ]
   then
-	  echo "wireguard config $conf.conf doesn't exist, create? (Y/N): "; read confirm
-	  if [[ $confirm == [yY] ]]
-	    then
-		    serverprivkey=$(wg genkey)
-		    serverpubkey=$(echo $serverprivkey | wg pubkey)
-		    umask 077
-		    touch /etc/wireguard/$conf.conf
-		    echo "[Interface]" >> /etc/wireguard/$conf.conf
-		    echo "PrivateKey=$serverprivkey" >> /etc/wireguard/$conf.conf
-		    echo "Address=10.$ipblock.0.1, fc00:$ipblock:0:0::1" >> /etc/wireguard/$conf.conf
-		    echo "ListenPort=$port" >> /etc/wireguard/$conf.conf
-		    echo "PostUp=logger -t wireguard 'Tunnel WireGuard-$conf started'" >> /etc/wireguard/$conf.conf
-		    echo "PostUp=iptables -t nat -A POSTROUTING -s 10.$ipblock.0.0/24 -o $netdev -j MASQUERADE" >> /etc/wireguard/$conf.conf
-		    echo "PostUp=ip6tables -t nat -A POSTROUTING -s fc00:$ipblock:0:0::/64 -o $netdev -j MASQUERADE" >> /etc/wireguard/$conf.conf
-		    echo "PostDown=logger -t wireguard 'Tunnel WireGuard-$conf stopped'" >> /etc/wireguard/$conf.conf
-		    echo "PostDown=iptables -t nat -D POSTROUTING -s 10.$ipblock.0.0/24 -o $netdev -j MASQUERADE" >> /etc/wireguard/$conf.conf
-		    echo "PostDown=ip6tables -t nat -D POSTROUTING -s fc00:$ipblock:0:0::/64 -o $netdev -j MASQUERADE" >> /etc/wireguard/$conf.conf
-		    echo "$serverpubkey" > /etc/wireguard/pubkey.$conf
-		    newconf=1
-	    else
-		    echo "no new config will be generated, aborting..."
-		    exit
-	  fi
-fi
-	  
+          echo "wireguard config $conf.conf doesn't exist, create? (Y/N): "; read -r confirm
+          if [[ $confirm == [yY] ]]
+            then
+                    serverprivkey=$(wg genkey)
+                    serverpubkey=$(echo "$serverprivkey" | wg pubkey)
+                    umask 077
+                    touch /etc/wireguard/"$conf".conf
+                    if [ -n "$ena_v6" ] # dual stack config
+                    then
+                        {
+                                echo "[Interface]"
+                                echo "PrivateKey=$serverprivkey"
+                                echo "Address=10.$ipblock.0.1, fc00:$ipblock:0:0::1"
+                                echo "ListenPort=$port"
+                                echo "PostUp=logger -t wireguard 'Tunnel WireGuard-$conf started'"
+                                echo "PostUp=iptables -t nat -A POSTROUTING -s 10.$ipblock.0.0/24 -o $netdev -j MASQUERADE"
+                                echo "PostUp=ip6tables -t nat -A POSTROUTING -s fc00:$ipblock:0:0::/64 -o $netdev -j MASQUERADE"
+                                echo "PostDown=logger -t wireguard 'Tunnel WireGuard-$conf stopped'"
+                                echo "PostDown=iptables -t nat -D POSTROUTING -s 10.$ipblock.0.0/24 -o $netdev -j MASQUERADE"
+                                echo "PostDown=ip6tables -t nat -D POSTROUTING -s fc00:$ipblock:0:0::/64 -o $netdev -j MASQUERADE"
+                        }  >> /etc/wireguard/"$conf".conf
+                        echo "$serverpubkey" > /etc/wireguard/pubkey."$conf"
+                        newconf=1
+                    else # ipv4 only config
+                        {
+                                echo "[Interface]"
+                                echo "PrivateKey=$serverprivkey"
+                                echo "Address=10.$ipblock.0.1"
+                                echo "ListenPort=$port"
+                                echo "PostUp=logger -t wireguard 'Tunnel WireGuard-$conf started'"
+                                echo "PostUp=iptables -t nat -A POSTROUTING -s 10.$ipblock.0.0/24 -o $netdev -j MASQUERADE"
+                                echo "PostDown=logger -t wireguard 'Tunnel WireGuard-$conf stopped'"
+                                echo "PostDown=iptables -t nat -D POSTROUTING -s 10.$ipblock.0.0/24 -o $netdev -j MASQUERADE"
+                        }  >> /etc/wireguard/"$conf".conf        
+                        echo "$serverpubkey" > /etc/wireguard/pubkey."$conf"
+                        newconf=1
+                    fi
 
-# boilerplate vars
+            else
+                    echo "no new config will be generated, aborting..."
+                    exit
+          fi
+fi
+
+
+# key generation comes here
 serverprivkey=$(sed -n '/Interface/,/\N/p' /etc/wireguard/"$conf".conf | grep "PrivateKey" | sed "s/PrivateKey=//")
 serverpubkey=$(cat /etc/wireguard/pubkey."$conf")
 clientprivkey=$(wg genkey)
-clientpubkey=$(echo $clientprivkey | wg pubkey)
+clientpubkey=$(echo "$clientprivkey" | wg pubkey)
 presharedkey=$(openssl rand 32 | base64)
-if [ -z $newconf ]
-  then
-	peercount=$(grep 'AllowedIPs' /etc/wireguard/"$conf".conf | sed "s/AllowedIPs=//" | sed -r "s/, (([[:xdigit:]]{,4}:)*)[[:xdigit:]]{,4}:[[:xdigit:]]{,4}//" | sed -r 's/(\b[0-9]{1,3}\.){2}[.0-9]{1,2}\b'// | tail -n 1)
+if [ -z "$newconf" ]
+  then # if peers exist, iterate number from there by counting IPs from server config
+        peercount=$(grep 'AllowedIPs' /etc/wireguard/"$conf".conf | sed "s/AllowedIPs=//" | sed -r "s/, (([[:xdigit:]]{,4}:)*)[[:xdigit:]]{,4}:[[:xdigit:]]{,4}//" | sed -r 's/(\b[0-9]{1,3}\.){2}[.0-9]{1,2}\b'// | tail -n 1)
   else
-	peercount=1
+        peercount=1
 fi
-newpeercount=$(($peercount + 1))
+newpeercount=$((peercount + 1))
 
 # disable wireguard if necessary
-wg-quick down $conf
+wg-quick down "$conf"
 
 # peer config
 echo "generating config..."
 sleep 1
-touch /etc/wireguard/peer$(($peercount - 1)).conf
-echo "[Interface]" >> /etc/wireguard/peer$(($peercount - 1)).conf
-echo "PrivateKey = $clientprivkey" >> /etc/wireguard/peer$(($peercount - 1)).conf
-echo "Address = 10.$ipblock.0.$newpeercount, fc00:$ipblock::$newpeercount/128" >> /etc/wireguard/peer$(($peercount - 1)).conf
-echo "DNS = $dns" >> /etc/wireguard/peer$(($peercount - 1)).conf
-echo "" >> /etc/wireguard/peer$(($peercount - 1)).conf
-echo "[Peer]" >> /etc/wireguard/peer$(($peercount - 1)).conf
-echo "PublicKey = $serverpubkey" >> /etc/wireguard/peer$(($peercount - 1)).conf
-echo "PresharedKey = $presharedkey" >> /etc/wireguard/peer$(($peercount - 1)).conf
-echo "AllowedIPs = $AllowIP" >> /etc/wireguard/peer$(($peercount - 1)).conf
-echo "Endpoint = $domain:$port" >> /etc/wireguard/peer$(($peercount - 1)).conf
+touch /etc/wireguard/peer$((peercount - 1)).conf
+if [ -n "$ena_v6" ] # dual stack config
+then
+{
+        echo "[Interface]" 
+        echo "PrivateKey = $clientprivkey"
+        echo "Address = 10.$ipblock.0.$newpeercount, fc00:$ipblock::$newpeercount/128"
+        echo "DNS = $dns, $dns6"
+        echo ""
+        echo "[Peer]"
+        echo "PublicKey = $serverpubkey"
+        echo "PresharedKey = $presharedkey"
+        echo "AllowedIPs = $AllowIP"
+        echo "Endpoint = $domain:$port"
+} >> /etc/wireguard/peer$((peercount - 1)).conf
+else # ipv4 only config
+{
+        echo "[Interface]"
+        echo "PrivateKey = $clientprivkey"
+        echo "Address = 10.$ipblock.0.$newpeercount"
+        echo "DNS = $dns"
+        echo ""
+        echo "[Peer]"
+        echo "PublicKey = $serverpubkey"
+        echo "PresharedKey = $presharedkey"
+        echo "AllowedIPs = $AllowIP"
+        echo "Endpoint = $domain:$port"
+} >> /etc/wireguard/peer$((peercount - 1)).conf
+fi
 
 # server config
 echo "appending to server config..."
 sleep 1
-echo "" >> /etc/wireguard/$conf.conf
-echo "[Peer]" >> /etc/wireguard/$conf.conf
-echo "# Auto-generated Client $(($peercount - 1))" >> /etc/wireguard/$conf.conf
-echo "Publickey=$clientpubkey" >> /etc/wireguard/$conf.conf
-echo "Presharedkey=$presharedkey" >> /etc/wireguard/$conf.conf
-echo "AllowedIPs=10.$ipblock.0.$newpeercount, fc00:$ipblock:0:0::$newpeercount" >> /etc/wireguard/$conf.conf
+{
+        echo ""
+        echo "[Peer]"
+        echo "# Auto-generated Client $((peercount - 1))"
+        echo "Publickey=$clientpubkey"
+        echo "Presharedkey=$presharedkey"   
+} >> /etc/wireguard/"$conf".conf
 
-# generate QR code, if qrencode is installed
+if [ -n "$ena_v6" ] # dual stack config
+then
+        echo "AllowedIPs=10.$ipblock.0.$newpeercount, fc00:$ipblock:0:0::$newpeercount" >> /etc/wireguard/"$conf".conf
+else # ipv4 only config
+        echo "AllowedIPs=10.$ipblock.0.$newpeercount" >> /etc/wireguard/"$conf".conf
+fi
+
+# generate QR code, if possible
 if [ "$(which qrencode)" != "/usr/bin/qrencode" ]
   then
-       	echo "qrencode not installed, skipping QR code generation..."
+        echo "qrencode not installed, skipping QR code generation..."
   else
         echo "generating QR code..."
         sleep 1
-        qrencode -t ansiutf8 < /etc/wireguard/peer$(($peercount - 1)).conf
+        qrencode -t ansiutf8 < /etc/wireguard/peer$((peercount - 1)).conf
 fi
 
-
 # re-enable wireguard
-wg-quick up $conf
+wg-quick up "$conf"
