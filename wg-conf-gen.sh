@@ -9,7 +9,7 @@
 port=""
 # specify endpoint domain here
 domain=""
-# specify DNS (IPv6)
+# specify DNS (IPv4)
 dns=""
 # enable IPv6 by uncommenting the variable
 # ena_v6=1
